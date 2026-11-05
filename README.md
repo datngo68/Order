@@ -38,12 +38,12 @@ Các trường hợp đã kiểm tra gồm phân quyền, yêu cầu lặp, tín
 - Vào **Bàn & QR** để chủ quán thêm bàn, đặt khu vực/số chỗ, sửa thông tin hoặc tạm ngưng phục vụ. Thu ngân xem bàn và xử lý lượt khách; nhân viên bếp không truy cập quản lý bàn.
 - Chọn **QR bàn** để tải SVG hoặc **In thẻ bàn**; **In QR các bàn** tạo trang in hàng loạt và hỗ trợ lưu PDF bằng hộp thoại in. QR được tạo trên máy chủ, không gửi đường dẫn bàn cho dịch vụ QR bên ngoài.
 - QR mở `/t/<mã-bí-mật>` trên tên miền lấy từ `APP_URL`. Khi triển khai website của quán, đặt `APP_URL` và `BETTER_AUTH_URL` thành cùng URL HTTPS công khai rồi khởi động lại ứng dụng **trước khi in**. QR localhost chỉ phục vụ phát triển, không dùng được từ điện thoại khách.
-- Khách không cần tài khoản: quét QR để vào đúng bàn, gửi món và gọi thêm. Các điện thoại tại cùng bàn dùng chung một lượt phục vụ. Tên bàn được máy chủ xác định từ lượt khách, không tin tên bàn tự nhập.
+- Khách không cần tài khoản: quét QR để vào đúng bàn, gửi món và gọi thêm. Các điện thoại tại cùng bàn dùng chung một lượt phục vụ. Nút **Xem bàn và gọi thêm món** trên trang theo dõi mở đúng lượt đó. Tên bàn được máy chủ xác định từ lượt khách, không tin tên bàn tự nhập.
 - Trạng thái bàn tự cập nhật mỗi 5 giây. Giới hạn cập nhật được tính theo lượt khách và IP để nhiều bàn dùng chung Wi-Fi không chặn lẫn nhau; vẫn có giới hạn tổng để ngăn yêu cầu quá dày.
 - **Gọi thanh toán** thông báo trên các màn hình của chủ quán/thu ngân. Khách được thấy trạng thái chờ hoặc đã tiếp nhận. Thao tác này không ghi nhận đã thu tiền. Khi đã gọi thanh toán, khách tạm dừng gọi thêm; nhân viên có thể chọn **Cho gọi thêm món**.
 - Nhân viên mở từng order để xác nhận món, xử lý bếp và ghi nhận tiền như luồng hiện có; **In hóa đơn bàn** tổng hợp các order chưa hủy trong lượt và số tiền còn phải thu.
 - **Kết thúc lượt khách** chỉ thực hiện được khi các món đã hoàn tất và các khoản thanh toán/hoàn tiền đã xử lý, hoặc lượt chưa có order. QR dán bàn giữ nguyên; lần quét tiếp theo mở lượt mới. Token lượt cũ không thể đặt thêm món hay yêu cầu thanh toán, không thấy đơn của khách mới.
-- **Đổi mã QR** chỉ thực hiện khi bàn không có lượt đang mở. Mã cũ ngừng hoạt động, cần in lại và thay mã trên bàn. Tạm ngưng bàn cũng yêu cầu đóng lượt hiện tại trước.
+- **Đổi mã QR** chỉ dành cho trường hợp chủ quán cần vô hiệu mã đang dán và bàn đã đóng lượt hiện tại. Khi đó cần in lại và thay mã trên bàn. Tạm ngưng bàn cũng yêu cầu đóng lượt hiện tại trước.
 
 Trang bàn công khai chỉ hiển thị món, số order, tổng tiền và trạng thái của lượt hiện tại; không trả tên khách, điện thoại, địa chỉ hay mã theo dõi riêng của từng order. QR là mã truy cập dành cho người tại bàn; nhân viên vẫn xác nhận đơn trước khi chế biến.
 

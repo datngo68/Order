@@ -5,7 +5,7 @@ import { AppError, ensure } from './errors';
 import { buildItems, calculateTotals, orderInputSchema, type OrderInput, type SnapshotLine } from './domain';
 import type { Order, Prisma } from '@/generated/prisma/client';
 import { lockedVisit } from './tables';
-export const orderInclude={events:{orderBy:{createdAt:'asc' as const}},attempts:{orderBy:{createdAt:'desc' as const}},delivery:{include:{expense:true}},records:true,tableVisit:{select:{token:true,closedAt:true,table:{select:{name:true,qrToken:true,active:true}}}}};
+export const orderInclude={events:{orderBy:{createdAt:'asc' as const}},attempts:{orderBy:{createdAt:'desc' as const}},delivery:{include:{expense:true}},records:true,tableVisit:{select:{token:true,closedAt:true,table:{select:{name:true,active:true}}}}};
 export async function lockedOrder(tx:Tx,id:string){await tx.$queryRawUnsafe('SELECT id FROM "Order" WHERE id = $1 FOR UPDATE',id);const order=await tx.order.findUnique({where:{id}});ensure(order,'Không tìm thấy đơn.',404);return order;}
 export async function quote(input:OrderInput,taxBps:number,shipping:number){
  const products=await db.product.findMany({where:{id:{in:input.items.map(i=>i.productId)},category:{active:true}}});const items=buildItems(input.items,products);const code=input.couponCode.trim().toUpperCase();const coupon=code?await db.coupon.findUnique({where:{code}}):null;ensure(!code||coupon,'Mã giảm giá không tồn tại.');return {items,couponCode:code||null,...calculateTotals(items,coupon,taxBps,input.type==='DELIVERY'?shipping:0)};

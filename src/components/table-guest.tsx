@@ -1,11 +1,14 @@
 'use client';
 import Link from 'next/link';
-import { useEffect,useState } from 'react';
+import { useRouter } from 'next/navigation';
+import { useEffect,useState,type ReactNode } from 'react';
 import { ForkKnife,Bell,CheckCircle,ArrowRight,Receipt } from '@phosphor-icons/react';
 import { Composer } from './composer';
 import { useRemote,post,useTask,Loading,ErrorState,Badge,Empty } from './ui';
 import type { Catalog,TableVisitView } from './types';
 import { money,statusLabels } from '@/lib/format';
+
+const tableVisitHref = (token: string) => '/t/visit/' + token;
 
 export function TableBillButton({token,visit,onChange}:{token:string;visit:TableVisitView;onChange:()=>void}) {
   const task=useTask();
@@ -16,14 +19,14 @@ export function TableBillButton({token,visit,onChange}:{token:string;visit:Table
   </div>;
 }
 
-export function TableOrderActions({visitToken,qrToken}:{visitToken:string;qrToken:string}) {
+export function TableOrderActions({visitToken}:{visitToken:string}) {
   const remote=useRemote<TableVisitView>('/api/table-visits/'+visitToken,5000);
   if(!remote.data)return remote.error?<ErrorState message={remote.error} retry={remote.reload}/>:null;
   if(remote.data.closedAt)return <div className="note-box">Lượt phục vụ tại bàn đã kết thúc. Cảm ơn bạn!</div>;
-  return <section className="table-tracking-actions"><Link className="btn full" href={'/t/'+qrToken}>Xem bàn và gọi thêm món<ArrowRight size={17}/></Link><TableBillButton token={visitToken} visit={remote.data} onChange={remote.reload}/></section>;
+  return <section className="table-tracking-actions"><Link className="btn full" href={tableVisitHref(visitToken)}>Xem bàn và gọi thêm món<ArrowRight size={17}/></Link><TableBillButton token={visitToken} visit={remote.data} onChange={remote.reload}/></section>;
 }
 
-function VisitMenu({token,qrToken}:{token:string;qrToken:string}) {
+function VisitMenu({token}:{token:string}) {
   const remote=useRemote<TableVisitView>('/api/table-visits/'+token,5000);
   const [showOrders,setShowOrders]=useState(false);
   const [lastOrder,setLastOrder]=useState<{number:number;token:string}|null>(null);
@@ -40,11 +43,37 @@ function VisitMenu({token,qrToken}:{token:string;qrToken:string}) {
   </>;
 }
 
-export function TableGuest({qrToken}:{qrToken:string}) {
+function TableGuestLayout({ children }: { children: ReactNode }) {
   const shop=useRemote<Catalog>('/api/catalog');
-  const [token,setToken]=useState<string|null>(null);
+  const name = shop.data?.shop.name ?? 'Quán Nhà';
+  const phone = shop.data?.shop.phone;
+  return <div className="public-page table-guest-page">
+    <header className="public-header">
+      <Link href="/menu" className="brand"><span className="brand-mark"><ForkKnife size={25}/></span><span>{name}</span></Link>
+      {phone && <a className="text-link" href={'tel:'+phone}>Liên hệ quán</a>}
+    </header>
+    <main className="public-container">{children}</main>
+    <footer className="public-footer">Gọi món tại bàn · {name}</footer>
+  </div>;
+}
+
+export function TableVisitGuest({ token }: { token: string }) {
+  return <TableGuestLayout><VisitMenu key={token} token={token}/></TableGuestLayout>;
+}
+
+export function TableGuest({qrToken}:{qrToken:string}) {
+  const router = useRouter();
   const [error,setError]=useState('');
   const [revision,setRevision]=useState(0);
-  useEffect(()=>{let alive=true;setError('');post<{token:string}>('/api/table/'+qrToken+'/open',{}).then(data=>{if(alive)setToken(data.token);}).catch(error=>{if(alive)setError(error instanceof Error?error.message:'Chưa mở được bàn.');});return()=>{alive=false;};},[qrToken,revision]);
-  return <div className="public-page table-guest-page"><header className="public-header"><Link href="/menu" className="brand"><span className="brand-mark"><ForkKnife size={25}/></span><span>{shop.data?.shop.name??'Quán Nhà'}</span></Link>{shop.data?.shop.phone&&<a className="text-link" href={'tel:'+shop.data.shop.phone}>Liên hệ quán</a>}</header><main className="public-container">{error?<ErrorState message={error} retry={()=>setRevision(value=>value+1)}/>:token?<VisitMenu key={token} token={token} qrToken={qrToken}/>:<Loading/>}</main><footer className="public-footer">Gọi món tại bàn · {shop.data?.shop.name??'Quán Nhà'}</footer></div>;
+  useEffect(() => {
+    let alive = true;
+    setError('');
+    post<{ token: string }>('/api/table/' + qrToken + '/open', {}).then(({ token }) => {
+      if (alive) router.replace(tableVisitHref(token));
+    }).catch(error => {
+      if (alive) setError(error instanceof Error ? error.message : 'Chưa mở được bàn.');
+    });
+    return () => { alive = false; };
+  }, [qrToken, revision, router]);
+  return <TableGuestLayout>{error?<ErrorState message={error} retry={()=>setRevision(value=>value+1)}/>:<Loading/>}</TableGuestLayout>;
 }

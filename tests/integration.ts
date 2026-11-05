@@ -379,6 +379,7 @@ async function main() {
       assert.equal(publicData.orders.length,1);assert.equal(publicData.total,tableOrder.total);
       for(const key of ['token','phone','customerName','address','payment','records','id'])assert.equal(key in publicData.orders[0],false);
       const tracked=await request('track/'+tableOrder.token);assert.equal(tracked.tableVisit.token,visitToken);
+      assert.ok(!JSON.stringify(tracked).includes(table.qrToken));
     });
     await check('Gọi thêm món cùng bàn; hai yêu cầu thanh toán chỉ ghi một lần',async()=>{
       await request('orders',input({type:'DINE_IN',tableVisitToken:visitToken}),undefined,201);
@@ -404,7 +405,7 @@ async function main() {
       assert.equal(visit.billRequestedAt,null);
       await request('orders',input({type:'DINE_IN',tableVisitToken:visitToken}),undefined,201);
     });
-    await check('Kết thúc lượt tách khách tiếp theo; token cũ không gọi món hoặc thanh toán được',async()=>{
+    await check('Quét lại cùng QR mở lượt mới; liên kết lượt cũ không gọi món hoặc thanh toán được',async()=>{
       const visit=await store.tableVisit.findUniqueOrThrow({where:{token:visitToken}});
       const orders=await store.order.findMany({where:{tableVisitId:visit.id}});
       for(const original of orders){
@@ -417,7 +418,9 @@ async function main() {
       await request('table-visits/'+visitToken+'/bill',{},undefined,409);
       const next=await request('table/'+table.qrToken+'/open',{});assert.notEqual(next.token,visitToken);
       assert.equal((await request('table-visits/'+next.token)).orders.length,0);
-      assert.equal((await request('table-visits/'+visitToken)).orders.length,0);
+      const oldVisit=await request('table-visits/'+visitToken);
+      assert.ok(oldVisit.closedAt);
+      assert.equal(oldVisit.orders.length,0);
       const nextVisit=await store.tableVisit.findUniqueOrThrow({where:{token:next.token}});
       assert.equal((await getTableBillVisit(table.id))?.id, nextVisit.id);
       const closedBill = await getTableBillVisit(table.id, visit.id);
@@ -431,6 +434,10 @@ async function main() {
       const oldToken=table.qrToken;
       table=await request('tables/'+table.id+'/rotate',{version:table.version},'OWNER');
       assert.notEqual(table.qrToken,oldToken);
+      const oldTracking=await request('track/'+tableOrder.token);
+      assert.equal(oldTracking.tableVisit.token,visitToken);
+      assert.ok(oldTracking.tableVisit.closedAt);
+      assert.ok(!JSON.stringify(oldTracking).includes(table.qrToken));
       await request('table/'+oldToken,undefined,undefined,404);
       await request('table/'+oldToken+'/open',{},undefined,404);
       await request('tables/'+table.id,{...tableBody,active:false,version:table.version},'OWNER');
