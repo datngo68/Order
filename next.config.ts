@@ -2,6 +2,9 @@ import type { NextConfig } from 'next';
 const config: NextConfig = {
   output: 'standalone', poweredByHeader: false,
   serverExternalPackages: ['pg', '@prisma/adapter-pg'],
+  outputFileTracingIncludes: {
+    '/api/\\[\\.\\.\\.path\\]': ['node_modules/@img/sharp-*/lib/**/*'],
+  },
   async headers() { return [{source: '/:path*', headers: [
     {key:'X-Content-Type-Options',value:'nosniff'},
     {key:'Referrer-Policy',value:'same-origin'},
