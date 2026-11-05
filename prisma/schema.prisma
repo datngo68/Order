@@ -1,0 +1,305 @@
+generator client {
+  provider = "prisma-client"
+  output = "../src/generated/prisma"
+}
+datasource db {
+  provider = "postgresql"
+}
+model User {
+  id String @id
+  name String
+  email String @unique
+  emailVerified Boolean @default(false)
+  image String?
+  username String? @unique
+  displayUsername String?
+  role String @default("CASHIER")
+  banned Boolean @default(false)
+  banReason String?
+  banExpires DateTime?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  sessions Session[]
+  accounts Account[]
+  @@map("user")
+}
+model Session {
+  id String @id
+  expiresAt DateTime
+  token String @unique
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  ipAddress String?
+  userAgent String?
+  userId String
+  impersonatedBy String?
+  user User @relation(fields:[userId],references:[id],onDelete:Cascade)
+  @@index([userId])
+  @@map("session")
+}
+model Account {
+  id String @id
+  accountId String
+  providerId String
+  userId String
+  accessToken String?
+  refreshToken String?
+  idToken String?
+  accessTokenExpiresAt DateTime?
+  refreshTokenExpiresAt DateTime?
+  scope String?
+  password String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  user User @relation(fields:[userId],references:[id],onDelete:Cascade)
+  @@index([userId])
+  @@map("account")
+}
+model Verification {
+  id String @id
+  identifier String
+  value String
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  @@index([identifier])
+  @@map("verification")
+}
+model Shop {
+  id String @id @default("main")
+  name String @default("Quán Nhà")
+  tagline String @default("Món quen, vị nhà.")
+  phone String @default("")
+  address String @default("")
+  acceptingOrders Boolean @default(true)
+  taxBps Int @default(0)
+  paymentMode String @default("MANUAL")
+  bankName String @default("")
+  bankAccount String @default("")
+  bankHolder String @default("")
+  updatedAt DateTime @updatedAt
+}
+model Category {
+  id String @id @default(cuid())
+  name String
+  sort Int @default(0)
+  active Boolean @default(true)
+  products Product[]
+}
+model Product {
+  id String @id @default(cuid())
+  categoryId String
+  category Category @relation(fields:[categoryId],references:[id])
+  name String
+  description String @default("")
+  price Int
+  image String?
+  available Boolean @default(true)
+  active Boolean @default(true)
+  sort Int @default(0)
+  optionGroups Json @default("[]")
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  @@index([categoryId,active])
+}
+model Coupon {
+  id String @id @default(cuid())
+  code String @unique
+  type String
+  value Int
+  minSubtotal Int @default(0)
+  maxDiscount Int?
+  startsAt DateTime?
+  expiresAt DateTime?
+  active Boolean @default(true)
+}
+model Order {
+  id String @id @default(cuid())
+  number Int @default(autoincrement()) @unique
+  token String @unique
+  creationKey String @unique
+  requestHash String
+  source String
+  type String
+  status String @default("RECEIVED")
+  paymentStatus String @default("UNPAID")
+  paymentMethod String
+  paymentMode String
+  customerName String @default("")
+  phone String @default("")
+  address String @default("")
+  tableName String @default("")
+  tableVisitId String?
+  tableVisit TableVisit? @relation(fields:[tableVisitId],references:[id])
+  note String @default("")
+  items Json
+  couponCode String?
+  subtotal Int
+  discount Int @default(0)
+  taxBps Int @default(0)
+  tax Int @default(0)
+  shipping Int @default(0)
+  total Int
+  version Int @default(0)
+  confirmedAt DateTime?
+  queuedAt DateTime?
+  completedAt DateTime?
+  cancelledAt DateTime?
+  priceLockedAt DateTime?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  events OrderEvent[]
+  attempts PaymentAttempt[]
+  records PaymentRecord[]
+  delivery Delivery?
+  @@index([status,queuedAt])
+  @@index([createdAt])
+  @@index([tableVisitId])
+}
+model DiningTable {
+  id String @id @default(cuid())
+  name String @unique
+  area String @default("")
+  seats Int @default(4)
+  active Boolean @default(true)
+  qrToken String @unique
+  version Int @default(0)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  visits TableVisit[]
+}
+model TableVisit {
+  id String @id @default(cuid())
+  tableId String
+  table DiningTable @relation(fields:[tableId],references:[id])
+  token String @unique
+  activeTableId String? @unique
+  version Int @default(0)
+  openedAt DateTime @default(now())
+  billRequestedAt DateTime?
+  billAcknowledgedAt DateTime?
+  closedAt DateTime?
+  orders Order[]
+  @@index([tableId,openedAt])
+  @@index([closedAt,billRequestedAt])
+}
+model OrderEvent {
+  id String @id @default(cuid())
+  orderId String
+  order Order @relation(fields:[orderId],references:[id])
+  action String
+  actorId String?
+  note String @default("")
+  createdAt DateTime @default(now())
+  @@index([orderId,createdAt])
+}
+model PaymentAttempt {
+  id String @id @default(cuid())
+  orderId String
+  order Order @relation(fields:[orderId],references:[id])
+  externalId String? @unique
+  idempotencyKey String @unique
+  amount Int
+  state String @default("NEW")
+  payUrl String?
+  transferContent String?
+  expiresAt DateTime?
+  leaseUntil DateTime?
+  nextPollAt DateTime @default(now())
+  errorCount Int @default(0)
+  lastError String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  @@index([state,nextPollAt])
+}
+model BankEvent {
+  id String @id
+  transactionId String? @unique
+  externalOrderId String?
+  state String
+  reason String?
+  payload Json
+  resolvedBy String?
+  resolvedAt DateTime?
+  resolution String?
+  createdAt DateTime @default(now())
+  @@index([state,createdAt])
+}
+model PaymentRecord {
+  id String @id @default(cuid())
+  orderId String
+  order Order @relation(fields:[orderId],references:[id])
+  kind String
+  method String
+  amount Int
+  subtotal Int
+  discount Int
+  tax Int
+  shipping Int
+  actorId String?
+  reference String? @unique
+  note String @default("")
+  paidAt DateTime @default(now())
+  @@unique([orderId,kind])
+  @@index([paidAt])
+}
+model Delivery {
+  id String @id @default(cuid())
+  orderId String @unique
+  order Order @relation(fields:[orderId],references:[id])
+  courier String @default("")
+  courierPhone String @default("")
+  status String @default("UNASSIGNED")
+  cost Int @default(0)
+  note String @default("")
+  version Int @default(0)
+  expense Expense?
+  updatedAt DateTime @updatedAt
+}
+model Ingredient {
+  id String @id @default(cuid())
+  name String
+  unit String
+  supplier String @default("")
+  unitPrice Int @default(0)
+  active Boolean @default(true)
+}
+model Purchase {
+  id String @id @default(cuid())
+  supplier String
+  items Json
+  total Int
+  note String @default("")
+  purchasedAt DateTime
+  paidAt DateTime?
+  actorId String
+  expense Expense?
+  createdAt DateTime @default(now())
+}
+model Expense {
+  id String @id @default(cuid())
+  category String
+  amount Int
+  note String @default("")
+  paidAt DateTime
+  actorId String
+  purchaseId String? @unique
+  purchase Purchase? @relation(fields:[purchaseId],references:[id])
+  deliveryId String? @unique
+  delivery Delivery? @relation(fields:[deliveryId],references:[id])
+  createdAt DateTime @default(now())
+  @@index([paidAt])
+}
+model Audit {
+  id String @id @default(cuid())
+  actorId String?
+  action String
+  targetId String?
+  detail Json @default("{}")
+  createdAt DateTime @default(now())
+}
+model RequestLimit {
+  key String @id
+  count Int @default(1)
+  expiresAt DateTime
+}

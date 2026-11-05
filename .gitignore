@@ -1,0 +1,27 @@
+node_modules/
+.next/
+next-env.d.ts
+*.tsbuildinfo
+/src/generated/
+coverage/
+test-results/
+
+# Local configuration, credentials and persistent data
+.env
+.env.*
+!.env.example
+.envrc
+/.runtime/
+/.secrets/
+/uploads/
+/backups/
+*.log
+*.sql.gz
+*.dump
+*.bak
+*.db
+*.sqlite*
+*.pem
+*.key
+*.p12
+*.pfx

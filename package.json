@@ -1,0 +1,49 @@
+{
+  "name": "quan-nha-order",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "dev": "next dev --hostname 127.0.0.1 --port 3100",
+    "build": "prisma generate && next build",
+    "start": "next start --hostname 0.0.0.0 --port 3100",
+    "typecheck": "prisma generate && next typegen && tsc --noEmit",
+    "test": "vitest run",
+    "test:integration": "tsx --env-file=.env tests/integration.ts",
+    "db:generate": "prisma generate",
+    "db:migrate": "prisma migrate deploy",
+    "db:dev": "prisma migrate dev",
+    "seed:demo": "tsx --env-file=.env scripts/seed.ts",
+    "owner:create": "tsx --env-file=.env scripts/create-owner.ts",
+    "worker": "tsx scripts/worker.ts"
+  },
+  "dependencies": {
+    "@fontsource/be-vietnam-pro": "^5.2.7",
+    "@phosphor-icons/react": "^2.1.10",
+    "@prisma/adapter-pg": "7.10.1",
+    "@prisma/client": "7.10.1",
+    "@radix-ui/react-dialog": "^1.1.15",
+    "better-auth": "1.7.17",
+    "decimal.js": "^10.6.0",
+    "dotenv": "^17.2.3",
+    "next": "16.4.5",
+    "pg": "^8.16.3",
+    "qrcode": "^1.5.4",
+    "react": "^19.2.0",
+    "react-dom": "^19.2.0",
+    "sharp": "^0.34.4",
+    "tsx": "^4.20.6",
+    "zod": "^4.1.12"
+  },
+  "devDependencies": {
+    "@tailwindcss/postcss": "^4.1.16",
+    "@types/node": "^24.10.0",
+    "@types/pg": "^8.15.6",
+    "@types/qrcode": "^1.5.6",
+    "@types/react": "^19.2.2",
+    "@types/react-dom": "^19.2.2",
+    "prisma": "7.10.1",
+    "tailwindcss": "^4.1.16",
+    "typescript": "^5.9.3",
+    "vitest": "^4.0.4"
+  }
+}

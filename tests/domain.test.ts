@@ -1,0 +1,26 @@
+import { describe,it,expect } from 'vitest';
+import { createHmac } from 'node:crypto';
+import { buildItems,calculateTotals,reportRange,orderInputSchema,optionGroupsSchema } from '../src/lib/domain';
+import { verifyBankSignature } from '../src/lib/payments';
+const product={id:'bread',name:'Bánh mì',price:30000,active:true,available:true,optionGroups:[{id:'extra',name:'Thêm',min:1,max:1,options:[{id:'egg',name:'Trứng',price:5000},{id:'cheese',name:'Phô mai',price:7000}]}]};
+const lines=[{productId:'bread',quantity:2,selected:['egg'],note:''}];
+const coupon={code:'TEST10',type:'PERCENT',value:10,minSubtotal:0,maxDiscount:null,startsAt:null,expiresAt:null,active:true};
+describe('Định giá order',()=>{
+ it('tính đúng 83.040đ cho ví dụ đã chốt',()=>expect(calculateTotals(buildItems(lines,[product]),coupon,800,15000)).toEqual({subtotal:70000,discount:7000,taxBps:800,tax:5040,shipping:15000,total:83040}));
+ it('tắt thuế và làm tròn nửa lên đến đồng',()=>{const items=buildItems([{...lines[0],quantity:1,selected:[]}],[{...product,price:1,optionGroups:[]}]);expect(calculateTotals(items,null,0,0).total).toBe(1);expect(calculateTotals(items,null,5000,0).tax).toBe(1);});
+ it('không tính thuế trên phí giao hàng',()=>{const items=buildItems(lines,[product]);expect(calculateTotals(items,null,1000,10000).tax).toBe(7000);expect(calculateTotals(items,null,0,10000).total).toBe(80000);});
+ it('không để tổng âm khi giảm cố định lớn hơn giá món',()=>expect(calculateTotals(buildItems(lines,[product]),{...coupon,type:'FIXED',value:100000},800,0).total).toBe(0));
+ it('áp trần giảm giá',()=>expect(calculateTotals(buildItems(lines,[product]),{...coupon,maxDiscount:3000},0,0).discount).toBe(3000));
+ it('từ chối mã hết hạn, chưa bắt đầu và chưa đủ tiền tối thiểu',()=>{for(const override of [{expiresAt:new Date(0)},{startsAt:new Date('2099-01-01')},{minSubtotal:90000},{active:false}])expect(()=>calculateTotals(buildItems(lines,[product]),{...coupon,...override},0,0)).toThrow();});
+ it('bắt buộc chọn option và không nhận option của món khác',()=>{for(const selected of [[],['unknown'],['egg','cheese'],['egg','egg']])expect(()=>buildItems([{...lines[0],selected}],[product])).toThrow();});
+ it('từ chối món hết hàng và món đã ẩn',()=>{expect(()=>buildItems(lines,[{...product,available:false}])).toThrow();expect(()=>buildItems(lines,[{...product,active:false}])).toThrow();});
+ it('không tin đơn giá do client chèn thêm',()=>{const parsed=orderInputSchema.parse({key:crypto.randomUUID(),type:'TAKEAWAY',paymentMethod:'CASH',items:[{...lines[0],unitPrice:1}]});expect(buildItems(parsed.items,[product])[0].total).toBe(70000);});
+ it('yêu cầu đủ thông tin ship và giới hạn số lượng',()=>{expect(()=>orderInputSchema.parse({key:crypto.randomUUID(),type:'DELIVERY',paymentMethod:'COD',items:lines})).toThrow();expect(()=>orderInputSchema.parse({key:crypto.randomUUID(),type:'TAKEAWAY',paymentMethod:'CASH',items:[{...lines[0],quantity:0}]})).toThrow();});
+ it('không chấp nhận nhóm option trùng mã',()=>expect(()=>optionGroupsSchema.parse([{id:'a',name:'A',min:0,max:1,options:[{id:'a',name:'A',price:0}]}])).toThrow());
+ it('chốt ngày Việt Nam bằng khoảng nửa mở, qua năm',()=>{const range=reportRange('2026-12-31','2027-01-01');expect(range.start.toISOString()).toBe('2026-12-30T17:00:00.000Z');expect(range.end.toISOString()).toBe('2027-01-01T17:00:00.000Z');});
+});
+describe('Chữ ký APIBank',()=>{const secret='test-only-webhook-secret';const raw=Buffer.from('{"amount_vnd":83040}');const t=1800000000;const signature='t='+t+',v1='+createHmac('sha256',secret).update(t+'.').update(raw).digest('hex');
+ it('xác minh raw body và timestamp',()=>expect(verifyBankSignature(raw,signature,secret,t)).toBe(true));
+ it('từ chối nội dung bị sửa, sai khóa, quá hạn và timestamp tương lai',()=>{expect(verifyBankSignature(Buffer.from('{ "amount_vnd":83040 }'),signature,secret,t)).toBe(false);expect(verifyBankSignature(raw,signature,'wrong',t)).toBe(false);expect(verifyBankSignature(raw,signature,secret,t+301)).toBe(false);expect(verifyBankSignature(raw,signature,secret,t-301)).toBe(false);});
+ it('chữ ký thiếu hoặc sai độ dài không gây crash',()=>{for(const header of [null,'','t=1,v1=aa','t=x,v1='+'a'.repeat(64)])expect(verifyBankSignature(raw,header,secret,t)).toBe(false);});
+});
