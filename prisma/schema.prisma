@@ -211,6 +211,7 @@ model PaymentAttempt {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
   @@index([state,nextPollAt])
+  @@index([orderId,createdAt])
 }
 model BankEvent {
   id String @id
@@ -266,6 +267,7 @@ model Ingredient {
 }
 model Purchase {
   id String @id @default(cuid())
+  requestId String? @unique
   supplier String
   items Json
   total Int
@@ -278,6 +280,7 @@ model Purchase {
 }
 model Expense {
   id String @id @default(cuid())
+  requestId String? @unique
   category String
   amount Int
   note String @default("")
@@ -302,4 +305,5 @@ model RequestLimit {
   key String @id
   count Int @default(1)
   expiresAt DateTime
+  @@index([expiresAt])
 }

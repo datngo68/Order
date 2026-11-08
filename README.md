@@ -16,6 +16,8 @@ Yêu cầu Node.js 22.12 trở lên, npm và PostgreSQL. Dùng `npm.cmd` trên W
 
 Chế độ `MANUAL` dùng được khi chưa cấu hình ngân hàng. Muốn dùng APIBank, điền bốn biến `APIBANK_*` trong `.env`, chọn chế độ APIBank trong cài đặt quán và chạy `npm run worker` ở tiến trình riêng. Đăng ký webhook `/api/payments/apibank/webhook` tại APIBank. Worker dùng API đối soát để phục hồi khi webhook không đến. Chỉ đặt `APIBANK_ALLOW_HTTP=1` cho APIBank local khi phát triển.
 
+`TRUST_PROXY` không đặt hoặc khác `0` (ví dụ `TRUST_PROXY=1`) mặc định tin `X-Forwarded-For`, vì ứng dụng được thiết kế chạy sau reverse proxy (nginx/caddy) ghi đè hoặc nối IP kết nối thực vào cuối header này. Ứng dụng dùng phần tử cuối nếu là IP hợp lệ cho rate limit (kể cả đăng nhập); nếu header thiếu hoặc IP không hợp lệ thì dùng bucket chung `unknown`. Bắt buộc chặn truy cập trực tiếp cổng 3100 từ Internet để khách không thể giả mạo header. Nếu không có proxy, đặt `TRUST_PROXY=0` để bỏ qua header; khi đó rate limit dùng chung bucket `unknown`.
+
 ## Kiểm tra trước khi sử dụng
 
 ```sh

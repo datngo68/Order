@@ -4,13 +4,14 @@ import path from 'node:path';
 import sharp from 'sharp';
 import QRCode from 'qrcode';
 import { db } from '@/lib/db';
-import { actor,body,handler,json,publicLimit,sameOrigin } from '@/lib/http';
+import { actor,body,handler,json,publicLimit,requestLimit,sameOrigin } from '@/lib/http';
 import { auth } from '@/lib/auth';
+import { readLimitedBody } from '@/lib/request-body';
 import { ensure,AppError } from '@/lib/errors';
 import { orderInputSchema } from '@/lib/domain';
 import { createOrder,confirmOrder,editOrder,orderAction,customerOrder,getOrder,orderInclude,quote } from '@/lib/orders';
 import { applyBankEvent,bankConfigured,beginPayment,cancelActivePayments,verifyBankSignature } from '@/lib/payments';
-import { saveResource,createPurchase,payPurchase,createExpense,saveDelivery } from '@/lib/admin';
+import { saveResource,setProductAvailability,createPurchase,payPurchase,createExpense,saveDelivery } from '@/lib/admin';
 import { report,reportCsv } from '@/lib/reports';
 import { vnDay } from '@/lib/format';
 import { listTables,openTable,publicTable,publicVisit,requestTableBill,saveTable,rotateTableQr,tableVisitAction,tableQrUrl } from '@/lib/tables';
@@ -43,7 +44,7 @@ export async function GET(request:Request,context:Context){return handler(async(
   const svg=await QRCode.toString(tableQrUrl(table.qrToken),{type:'svg',errorCorrectionLevel:'M',margin:4,width:640});
   return new Response(svg,{headers:{'Content-Type':'image/svg+xml','Cache-Control':'private, no-store',...(url.searchParams.has('download')?{'Content-Disposition':'attachment; filename="table-'+table.id+'.svg"'}:{})}});
  }
- if(parts[0]==='track'&&parts.length===2){await publicLimit(request,'track',120);return json(customerOrder(await track(parts[1])));}
+ if(parts[0]==='track'&&parts.length===2){await publicLimit(request,'track',3600);const order=await track(parts[1]);await requestLimit('track-token',parts[1],60);return json(customerOrder(order));}
  if(route==='kitchen'){await actor(request);return json(await db.order.findMany({where:{status:{in:['CONFIRMED','PREPARING','READY']},queuedAt:{not:null}},select:{id:true,number:true,version:true,type:true,tableName:true,status:true,note:true,items:true,queuedAt:true,createdAt:true},orderBy:[{queuedAt:'asc'},{number:'asc'}],take:200}));}
  if(route==='orders'){
   await actor(request,['OWNER','CASHIER']);
@@ -74,13 +75,13 @@ export async function GET(request:Request,context:Context){return handler(async(
  if(route==='manage/staff'){await actor(request,['OWNER']);return json(await db.user.findMany({select:{id:true,name:true,email:true,username:true,role:true,banned:true,createdAt:true},orderBy:{createdAt:'asc'}}));}
  if(route==='manage/reviews'){await actor(request,['OWNER']);return json(await db.bankEvent.findMany({where:{state:'REVIEW'},orderBy:{createdAt:'desc'},take:100}));}
  if(route==='reports'){await actor(request,['OWNER']);const group=z.enum(['day','month','year']).parse(url.searchParams.get('group')??'day');const data=await report(url.searchParams.get('from')??vnDay(),url.searchParams.get('to')??vnDay(),group);if(url.searchParams.get('format')==='csv')return new Response(reportCsv([...data.rows,data.total]),{headers:{'Content-Type':'text/csv; charset=utf-8','Content-Disposition':'attachment; filename="bao-cao.csv"','Cache-Control':'no-store'}});return json(data);}
- if(parts[0]==='payment-qr'&&parts.length===2){await publicLimit(request,'qr',120);const attempt=await db.paymentAttempt.findUnique({where:{id:parts[1]},include:{order:true}});ensure(attempt?.externalId,'Chưa có QR thanh toán.',404);if(url.searchParams.get('token'))ensure(attempt.order.token===url.searchParams.get('token'),'Không tìm thấy QR.',404);else await actor(request,['OWNER','CASHIER']);ensure(attempt.state==='PENDING'&&attempt.order.paymentStatus==='UNPAID','QR đã hết hiệu lực.',410);const image=await fetch(new URL('/qr/'+encodeURIComponent(attempt.externalId)+'.png',process.env.APIBANK_BASE_URL),{signal:AbortSignal.timeout(10000),redirect:'error'});ensure(image.ok&&image.headers.get('content-type')?.includes('image/png'),'Chưa tải được QR.',502);const bytes=await image.arrayBuffer();ensure(bytes.byteLength<1000000,'QR quá lớn.',502);return new Response(bytes,{headers:{'Content-Type':'image/png','Cache-Control':'private, no-store'}});}
+ if(parts[0]==='payment-qr'&&parts.length===2){await publicLimit(request,'qr',120);const attempt=await db.paymentAttempt.findUnique({where:{id:parts[1]},include:{order:true}});ensure(attempt?.externalId,'Chưa có QR thanh toán.',404);if(url.searchParams.get('token'))ensure(attempt.order.token===url.searchParams.get('token'),'Không tìm thấy QR.',404);else await actor(request,['OWNER','CASHIER']);ensure(attempt.state==='PENDING'&&(!attempt.expiresAt||+attempt.expiresAt>Date.now())&&attempt.order.paymentStatus==='UNPAID','QR đã hết hiệu lực.',410);const image=await fetch(new URL('/qr/'+encodeURIComponent(attempt.externalId)+'.png',process.env.APIBANK_BASE_URL),{signal:AbortSignal.timeout(10000),redirect:'error'});ensure(image.ok&&image.headers.get('content-type')?.includes('image/png'),'Chưa tải được QR.',502);const bytes=await image.arrayBuffer();ensure(bytes.byteLength<1000000,'QR quá lớn.',502);return new Response(bytes,{headers:{'Content-Type':'image/png','Cache-Control':'private, no-store'}});}
  throw new AppError(404,'Không tìm thấy chức năng.');
 });}
 export async function POST(request:Request,context:Context){return handler(async()=>{
  const parts=(await context.params).path;const route=parts.join('/');
  if(route==='payments/apibank/webhook'){
-  ensure(Number(request.headers.get('content-length')??0)<=128000,'Payload quá lớn.',413);const raw=Buffer.from(await request.arrayBuffer());ensure(verifyBankSignature(raw,request.headers.get('x-signature'),process.env.APIBANK_WEBHOOK_SECRET??''),'Chữ ký webhook không hợp lệ.',401);let event:unknown;try{event=JSON.parse(raw.toString('utf8'));}catch{throw new AppError(400,'Payload không hợp lệ.');}if(event&&typeof event==='object'&&'type' in event&&event.type==='webhook.test')return json({ok:true});await applyBankEvent(event);return json({ok:true});
+  const raw=Buffer.from(await readLimitedBody(request,128_000));ensure(verifyBankSignature(raw,request.headers.get('x-signature'),process.env.APIBANK_WEBHOOK_SECRET??''),'Chữ ký webhook không hợp lệ.',401);let event:unknown;try{event=JSON.parse(raw.toString('utf8'));}catch{throw new AppError(400,'Payload không hợp lệ.');}if(event&&typeof event==='object'&&'type' in event&&event.type==='webhook.test')return json({ok:true});await applyBankEvent(event);return json({ok:true});
  }
  sameOrigin(request);
  if(parts[0]==='table'&&parts.length===3&&parts[2]==='open'){await publicLimit(request,'table-open',60);return json(await openTable(parts[1]));}
@@ -94,7 +95,7 @@ export async function POST(request:Request,context:Context){return handler(async
   if(parts.length===3&&parts[2]==='rotate')return json(await rotateTableQr(parts[1],data,staff));
  }
  if(route==='uploads'){
-  await actor(request,['OWNER']);ensure(Number(request.headers.get('content-length')??0)<=6_000_000,'Ảnh tối đa 5 MB.',413);const form=await request.formData();const file=form.get('file');ensure(file instanceof File&&file.size<=5_000_000,'Ảnh tối đa 5 MB.');const bytes=Buffer.from(await file.arrayBuffer());const img=sharp(bytes,{limitInputPixels:20000000});const metadata=await img.metadata();ensure(['jpeg','png','webp'].includes(metadata.format??''),'Chỉ hỗ trợ JPG, PNG hoặc WebP.');const name=crypto.randomUUID()+'.webp';const folder=path.resolve(/* turbopackIgnore: true */ process.env.UPLOAD_DIR??'uploads');await mkdir(folder,{recursive:true});await writeFile(path.join(folder,name),await img.resize(1000,1000,{fit:'inside',withoutEnlargement:true}).rotate().webp({quality:82}).toBuffer());return json({url:'/uploads/'+name},201);
+  await actor(request,['OWNER']);const raw=await readLimitedBody(request,6_000_000);const form=await new Request(request.url,{method:'POST',headers:{'Content-Type':request.headers.get('content-type')??''},body:new Blob([raw])}).formData();const file=form.get('file');ensure(file instanceof File&&file.size<=5_000_000,'Ảnh tối đa 5 MB.');const bytes=Buffer.from(await file.arrayBuffer());const img=sharp(bytes,{limitInputPixels:20000000});const metadata=await img.metadata();ensure(['jpeg','png','webp'].includes(metadata.format??''),'Chỉ hỗ trợ JPG, PNG hoặc WebP.');const name=crypto.randomUUID()+'.webp';const folder=path.resolve(/* turbopackIgnore: true */ process.env.UPLOAD_DIR??'uploads');await mkdir(folder,{recursive:true});await writeFile(path.join(folder,name),await img.resize(1000,1000,{fit:'inside',withoutEnlargement:true}).rotate().webp({quality:82}).toBuffer());return json({url:'/uploads/'+name},201);
  }
  if(route==='orders'||route==='pos/orders'){const staff=route==='pos/orders'?await actor(request,['OWNER','CASHIER']):null;const input=orderInputSchema.parse(await body(request));if(!staff){await publicLimit(request,'create-order',60);if(input.tableVisitToken)await publicLimit(request,'table-order:'+input.tableVisitToken,20);}const order=await createOrder(input,staff);return json({id:order.id,number:order.number,token:order.token},201);}
  if(route==='quote'){await publicLimit(request,'quote',60);const input=orderInputSchema.parse(await body(request));const shop=await db.shop.findUniqueOrThrow({where:{id:'main'}});return json(await quote(input,shop.taxBps,0));}
@@ -124,6 +125,7 @@ export async function POST(request:Request,context:Context){return handler(async
    await db.audit.create({data:{actorId:staff.id,action:'STAFF_'+values.action,targetId:values.userId}});return json({ok:true});
   }
   if(parts[1]==='reviews'&&parts[2]){const {resolution}=z.object({resolution:z.string().min(5).max(1000)}).parse(data);const result=await db.bankEvent.updateMany({where:{id:parts[2],state:'REVIEW'},data:{state:'RESOLVED',resolution,resolvedAt:new Date(),resolvedBy:staff.id}});ensure(result.count,'Giao dịch đã được xử lý.',409);return json({ok:true});}
+  if(parts[1]==='products'&&parts.length===4&&parts[3]==='availability')return json(await setProductAvailability(parts[2],data,staff));
   if(['products','categories','coupons','ingredients','settings'].includes(parts[1]))return json(await saveResource(parts[1],parts[2],data,staff));
  }
  throw new AppError(404,'Không tìm thấy chức năng.');

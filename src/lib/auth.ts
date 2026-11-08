@@ -11,6 +11,6 @@ export const auth=betterAuth({
  session:{expiresIn:60*60*12,updateAge:60*30},
  rateLimit:{enabled:true,window:60,max:30,customRules:{'/sign-in/username':{window:60,max:8},'/sign-in/email':{window:60,max:8}}},
  plugins:[username(),admin({defaultRole:'CASHIER',adminRoles:['OWNER'],roles:{OWNER:adminAc,CASHIER:userAc,KITCHEN:userAc}})],
- advanced:{useSecureCookies:process.env.APP_URL?.startsWith('https://')??false}
+ advanced:{ipAddress:{ipAddressHeaders:process.env.TRUST_PROXY!=='0'?['x-forwarded-for']:[]},useSecureCookies:process.env.APP_URL?.startsWith('https://')??false}
 });
 export type Actor={id:string;name:string;role:string};

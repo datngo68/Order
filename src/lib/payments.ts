@@ -1,6 +1,7 @@
 import { createHmac, timingSafeEqual } from 'node:crypto';
 import { z } from 'zod';
-import { db } from './db';
+import { db, type Tx } from './db';
+import { canRetryBankEvent, unmatchedBankEventReason } from './payment-event';
 import { AppError, ensure } from './errors';
 import { lockedOrder, receipt } from './orders';
 import type { Prisma } from '@/generated/prisma/client';
@@ -9,6 +10,7 @@ function base(){const url=new URL(process.env.APIBANK_BASE_URL??'');ensure(url.p
 const providerSchema=z.object({id:z.string().min(1),amount_vnd:z.coerce.number().int().positive(),status:z.enum(['pending','paid','review','expired','canceled','cancelled']),code:z.string().optional(),transfer_content:z.string().nullable().optional(),pay_url:z.string().nullable().optional(),expired_at:z.string().optional(),paid_at:z.string().nullable().optional(),paid_tx_id:z.string().nullable().optional(),bank_account_id:z.string().optional()});
 export type ProviderOrder=z.infer<typeof providerSchema>;
 const activePaymentStates=['NEW','PENDING','ERROR','VERIFYING'];
+async function lockBankOrder(tx:Tx,externalId:string){await tx.$queryRawUnsafe('SELECT 1 AS locked FROM pg_advisory_xact_lock(hashtextextended($1,0))','bank-order:'+externalId);}
 async function bankRequest(path:string,init:RequestInit={}){
  ensure(bankConfigured(),'Chưa cấu hình kết nối APIBank.',503);const response=await fetch(new URL(path,base()),{...init,cache:'no-store',signal:AbortSignal.timeout(12000),headers:{Authorization:'Bearer '+process.env.APIBANK_API_KEY,'Content-Type':'application/json',...init.headers}});
  if(!response.ok)throw new AppError(502,'APIBank chưa xử lý được yêu cầu (HTTP '+response.status+'). Đơn vẫn được giữ để thử lại.');return providerSchema.parse(await response.json());
@@ -21,6 +23,7 @@ export async function beginPayment(orderId:string){
   const reviews=await tx.paymentAttempt.findMany({where:{orderId,state:'REVIEW'},select:{externalId:true}});
   const unresolved=await tx.bankEvent.count({where:{state:'REVIEW',externalOrderId:{in:reviews.flatMap(review=>review.externalId?[review.externalId]:[])}}});
   ensure(!unresolved,'Quán đang kiểm tra giao dịch trước đó. Vui lòng liên hệ quán trước khi thanh toán thêm.',409);
+  await tx.paymentAttempt.updateMany({where:{orderId,state:'PENDING',expiresAt:{lte:new Date()}},data:{state:'EXPIRED',leaseUntil:null}});
   const existing=await tx.paymentAttempt.findFirst({where:{orderId,state:{in:activePaymentStates}},orderBy:{createdAt:'desc'}});if(existing)return existing;
   const count=await tx.paymentAttempt.count({where:{orderId,createdAt:{gte:new Date(Date.now()-3600000)}}});ensure(count<10,'Đã tạo quá nhiều yêu cầu thanh toán. Vui lòng liên hệ quán.',429);
   const created=await tx.paymentAttempt.create({data:{orderId,amount:order.total,idempotencyKey:'order-'+order.id+'-'+crypto.randomUUID()}});await tx.order.update({where:{id:orderId},data:{priceLockedAt:new Date(),version:{increment:1}}});return created;
@@ -34,13 +37,16 @@ export async function createRemote(id:string){
   const remote=await bankRequest('/v1/orders',{method:'POST',headers:{'Idempotency-Key':attempt.idempotencyKey},body:JSON.stringify({amount_vnd:attempt.amount,bank_account_id:process.env.APIBANK_BANK_ACCOUNT_ID,description:'Don #'+attempt.order.number,customer_ref:attempt.orderId,metadata:{order_internal_id:attempt.orderId,payment_attempt_id:attempt.id},ttl_seconds:900})});
   ensure(remote.amount_vnd===attempt.amount,'Số tiền APIBank không khớp.',502);const payUrl=safePayUrl(remote.pay_url);const expiresAt=remote.expired_at?new Date(remote.expired_at):new Date(Date.now()+900000);ensure(Number.isFinite(+expiresAt),'Thời hạn thanh toán không hợp lệ.',502);
   await db.$transaction(async tx=>{
-   await lockedOrder(tx,attempt.orderId);
+   // Serialize linking with webhooks that cannot find this external ID yet.
+   await lockBankOrder(tx,remote.id);await lockedOrder(tx,attempt.orderId);
    const current=await tx.paymentAttempt.findUniqueOrThrow({where:{id}});
    ensure(!current.externalId||current.externalId===remote.id,'Tham chiếu APIBank không khớp.',502);
    // A webhook may finish before the create request returns. Preserve its decision.
    const state=remote.status==='expired'?'EXPIRED':['canceled','cancelled'].includes(remote.status)?'CANCELLED':remote.status==='review'?'VERIFYING':'PENDING';
    await tx.paymentAttempt.update({where:{id},data:{externalId:remote.id,payUrl,transferContent:remote.transfer_content??remote.code??'',expiresAt,leaseUntil:null,...(activePaymentStates.includes(current.state)?{state,lastError:null,nextPollAt:new Date(Date.now()+60000)}:{})}});
   });
+  const unmatched=await db.bankEvent.findMany({where:{externalOrderId:remote.id,state:'REVIEW',reason:unmatchedBankEventReason,resolvedAt:null},orderBy:{createdAt:'asc'}});
+  for(const event of unmatched)await applyBankEvent(event.payload);
   if(remote.status==='paid')await reconcilePaid(remote);
  }catch(e){await db.paymentAttempt.updateMany({where:{id,state:{in:activePaymentStates}},data:{leaseUntil:null,lastError:e instanceof AppError?e.message:'Mất kết nối APIBank. Hệ thống sẽ thử lại.',errorCount:{increment:1},nextPollAt:new Date(Date.now()+60000)}});throw e;}
 }
@@ -51,26 +57,33 @@ const eventSchema=z.object({id:z.string().min(1).max(200),type:z.literal('paymen
 export async function applyBankEvent(payload:unknown){
  const event=eventSchema.parse(payload);const data=event.data;
  try{return await db.$transaction(async tx=>{
-  const existing=await tx.bankEvent.findFirst({where:{OR:[{id:event.id},{transactionId:data.transaction_id}]}});if(existing)return existing.state;
-  let attempt=await tx.paymentAttempt.findFirst({where:{OR:[{externalId:data.order_id},...(typeof data.metadata?.payment_attempt_id==='string'?[{id:data.metadata.payment_attempt_id,externalId:null}]:[])]}});
+  await lockBankOrder(tx,data.order_id);
+  const where={OR:[{id:event.id},{transactionId:data.transaction_id}]};let existing=await tx.bankEvent.findFirst({where});if(existing&&!canRetryBankEvent(existing))return existing.state;
+  // Retry the stored evidence, never a replacement payload from a duplicate.
+  const savedEvent=existing?eventSchema.parse(existing.payload):event;const savedData=savedEvent.data;
+  let attempt=await tx.paymentAttempt.findFirst({where:{OR:[{externalId:savedData.order_id},...(typeof savedData.metadata?.payment_attempt_id==='string'?[{id:savedData.metadata.payment_attempt_id,externalId:null}]:[])]}});
   let reason:string|null=null;
-  if(!attempt)reason='Không tìm thấy yêu cầu thanh toán tương ứng.';
+  if(!attempt)reason=unmatchedBankEventReason;
   const order=attempt?await lockedOrder(tx,attempt.orderId):null;
-  if(attempt)attempt=await tx.paymentAttempt.findUniqueOrThrow({where:{id:attempt.id}});
+  if(attempt){
+   existing=await tx.bankEvent.findFirst({where});if(existing&&!canRetryBankEvent(existing))return existing.state;
+   attempt=await tx.paymentAttempt.findUniqueOrThrow({where:{id:attempt.id}});
+  }
   if(attempt&&order){
-   if(attempt.externalId&&attempt.externalId!==data.order_id)reason='Tham chiếu APIBank không khớp.';
+   if(attempt.externalId&&attempt.externalId!==savedData.order_id)reason='Tham chiếu APIBank không khớp.';
    else if(attempt.state==='CANCELLED')reason='Giao dịch thuộc yêu cầu thanh toán đã hủy.';
    else if(attempt.state==='REVIEW')reason='Yêu cầu thanh toán đang cần đối soát thủ công.';
-   else if(data.amount_vnd!==attempt.amount||data.amount_vnd!==order.total)reason='Số tiền không khớp đơn.';
-   else if(data.metadata?.order_internal_id&&data.metadata.order_internal_id!==order.id)reason='Tham chiếu order không khớp.';
+   else if(savedData.amount_vnd!==attempt.amount||savedData.amount_vnd!==order.total)reason='Số tiền không khớp đơn.';
+   else if(savedData.metadata?.order_internal_id&&savedData.metadata.order_internal_id!==order.id)reason='Tham chiếu order không khớp.';
    else if(order.status==='CANCELLED'||order.status==='RECEIVED')reason='Tiền đến khi đơn đã hủy hoặc đang thay đổi.';
    else if(order.paymentStatus!=='UNPAID')reason='Đơn đã được ghi nhận thanh toán/hoàn tiền trước đó.';
   }
-  const paidAt=new Date(data.posted_at??event.created_at??new Date().toISOString());if(!Number.isFinite(+paidAt)||+paidAt>Date.now()+300000)reason='Thời điểm giao dịch không hợp lệ.';
+  const paidAt=new Date(savedData.posted_at??savedEvent.created_at??existing?.createdAt.toISOString()??new Date().toISOString());if(!Number.isFinite(+paidAt)||+paidAt>Date.now()+300000)reason='Thời điểm giao dịch không hợp lệ.';
   if(attempt?.expiresAt&&+paidAt>+attempt.expiresAt)reason='Giao dịch phát sinh sau khi yêu cầu đã hết hạn.';
-  await tx.bankEvent.create({data:{id:event.id,transactionId:data.transaction_id,externalOrderId:data.order_id,state:reason?'REVIEW':'APPLIED',reason,payload:event as unknown as Prisma.InputJsonValue}});
-  if(!reason&&attempt&&order){await receipt(tx,order,'APIBANK',null,data.transaction_id,paidAt);await tx.paymentAttempt.update({where:{id:attempt.id},data:{state:'PAID',externalId:data.order_id,leaseUntil:null,lastError:null}});}
-  else if(reason&&attempt&&attempt.state!=='PAID'){await tx.paymentAttempt.update({where:{id:attempt.id},data:{state:'REVIEW',externalId:attempt.externalId??data.order_id,leaseUntil:null,lastError:reason}});}
+  if(existing){const claimed=await tx.bankEvent.updateMany({where:{id:existing.id,state:'REVIEW',reason:unmatchedBankEventReason,resolvedAt:null},data:{state:reason?'REVIEW':'APPLIED',reason}});if(!claimed.count)return (await tx.bankEvent.findUniqueOrThrow({where:{id:existing.id}})).state;}
+  else await tx.bankEvent.create({data:{id:event.id,transactionId:savedData.transaction_id,externalOrderId:savedData.order_id,state:reason?'REVIEW':'APPLIED',reason,payload:savedEvent as unknown as Prisma.InputJsonValue}});
+  if(!reason&&attempt&&order){await receipt(tx,order,'APIBANK',null,savedData.transaction_id,paidAt);await tx.paymentAttempt.update({where:{id:attempt.id},data:{state:'PAID',externalId:savedData.order_id,leaseUntil:null,lastError:null}});}
+  else if(reason&&attempt&&attempt.state!=='PAID'){await tx.paymentAttempt.update({where:{id:attempt.id},data:{state:'REVIEW',externalId:attempt.externalId??savedData.order_id,leaseUntil:null,lastError:reason}});}
   return reason?'REVIEW':'APPLIED';
  });}catch(e){if(e&&typeof e==='object'&&'code' in e&&e.code==='P2002'){const saved=await db.bankEvent.findFirst({where:{OR:[{id:event.id},{transactionId:data.transaction_id}]}});if(saved)return saved.state;}throw e;}
 }

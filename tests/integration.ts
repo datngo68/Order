@@ -65,6 +65,7 @@ async function main() {
     source.pathname = '/' + database;
     process.env.DATABASE_URL = source.toString();
     process.env.APP_URL = 'http://127.0.0.1:3100';
+    process.env.TRUST_PROXY = '1';
     process.env.BETTER_AUTH_URL = process.env.APP_URL;
     process.env.BETTER_AUTH_SECRET = randomUUID() + randomUUID();
     const migrationDb = new pg.Client({ connectionString: source.toString() });
@@ -143,6 +144,53 @@ async function main() {
       await request('reports', undefined, 'CASHIER', 403);
       await request('kitchen', undefined, 'KITCHEN');
       await request('reports', undefined, 'OWNER');
+    });
+    await check('Chặn admin better-auth trực tiếp nhưng route nhân viên riêng vẫn dùng được', async () => {
+      const authRoutes = await import('../src/app/api/auth/[...all]/route');
+      for (const endpoint of ['set-user-password', 'create-user', 'ban-user', 'revoke-user-sessions']) {
+        for (const method of ['GET', 'POST'] as const) {
+          const response = await authRoutes[method](new Request(process.env.APP_URL + '/api/auth/admin/' + endpoint, { method, headers: { Cookie: sessions.OWNER } }));
+          assert.equal(response.status, 404);
+        }
+      }
+      const user = await request('manage/staff', { name: 'Nhân viên mới', username: 'new_staff', email: 'new@integration.example', password, role: 'CASHIER' }, 'OWNER', 201);
+      assert.ok(user.user.id);
+      await request('manage/staff-action', { userId: user.user.id, action: 'ban' }, 'OWNER');
+      assert.equal((await store.user.findUniqueOrThrow({ where: { id: user.user.id } })).banned, true);
+    });
+    await check('Bật/tắt hết món chỉ cập nhật available và ghi audit', async () => {
+      const original = await store.product.findUniqueOrThrow({ where: { id: 'bread' } });
+      await request('manage/products/bread/availability', { available: false, price: 1, name: 'Dữ liệu cũ', optionGroups: [] }, 'OWNER');
+      const changed = await store.product.findUniqueOrThrow({ where: { id: 'bread' } });
+      assert.equal(changed.available, false);
+      assert.equal(changed.price, original.price);
+      assert.equal(changed.name, original.name);
+      assert.deepEqual(changed.optionGroups, original.optionGroups);
+      assert.equal(await store.audit.count({ where: { action: 'PRODUCT_AVAILABILITY', targetId: 'bread' } }), 1);
+      await request('manage/products/bread/availability', { available: true }, 'OWNER');
+    });
+    await check('Phiếu mua gửi đồng thời/gửi lại chỉ tạo một phiếu và một khoản chi', async () => {
+      const ingredient = await store.ingredient.create({ data: { name: 'Bột kiểm thử', unit: 'kg' } });
+      const form = { requestId: randomUUID(), supplier: 'Nhà cung cấp thử', purchasedAt: new Date().toISOString(), paidAt: new Date().toISOString(), note: '', items: [{ ingredientId: ingredient.id, quantity: 2, unitPrice: 30000 }] };
+      const [a, b] = await Promise.all([request('manage/purchases', form, 'OWNER', 201), request('manage/purchases', form, 'OWNER', 201)]);
+      assert.equal(a.id, b.id);
+      await store.ingredient.update({ where: { id: ingredient.id }, data: { active: false } });
+      const retry = await request('manage/purchases', { ...form, supplier: 'Tên sửa sau khi gửi' }, 'OWNER', 201);
+      assert.equal(retry.id, a.id);
+      assert.equal(retry.supplier, form.supplier);
+      assert.equal(await store.purchase.count({ where: { requestId: form.requestId } }), 1);
+      assert.equal(await store.expense.count({ where: { purchaseId: a.id } }), 1);
+    });
+    await check('Khoản chi gửi đồng thời/gửi lại giữ nguyên bản ghi đầu tiên', async () => {
+      const form = { requestId: randomUUID(), category: 'OTHER', amount: 10000, note: 'Chi kiểm thử', paidAt: new Date().toISOString() };
+      const [a, b] = await Promise.all([request('manage/expenses', form, 'OWNER', 201), request('manage/expenses', form, 'OWNER', 201)]);
+      assert.equal(a.id, b.id);
+      const retry = await request('manage/expenses', { ...form, amount: 20000 }, 'OWNER', 201);
+      assert.equal(retry.id, a.id);
+      assert.equal(retry.amount, 10000);
+      assert.equal(await store.expense.count({ where: { requestId: form.requestId } }), 1);
+      const next = await request('manage/expenses', { ...form, requestId: randomUUID() }, 'OWNER', 201);
+      assert.notEqual(next.id, a.id);
     });
     await check('Đặt lại cùng yêu cầu chỉ tạo một đơn; nội dung khác bị từ chối', async () => {
       const body = input();
@@ -273,6 +321,66 @@ async function main() {
       assert.equal(attempt.state, 'REVIEW');
       assert.equal(attempt.externalId, [...remotes.values()].find(remote => (remote.metadata as { order_internal_id: string }).order_internal_id === order.id)?.id);
       assert.ok(attempt.lastError);
+    });
+    await check('Webhook đến sớm không có metadata được ghép khi createRemote nhận externalId', async () => {
+      const order = await transfer();
+      let payload!: ReturnType<typeof event>;
+      nextCreate = 'review-race';
+      beforeCreateResponse = async remote => {
+        payload = event({ externalId: String(remote.id), amount: Number(remote.amount_vnd) });
+        assert.equal(await applyBankEvent(payload), 'REVIEW');
+        assert.match((await store.bankEvent.findUniqueOrThrow({ where: { id: payload.id } })).reason ?? '', /Không tìm thấy yêu cầu/);
+      };
+      const attempt = await beginPayment(order.id);
+      assert.equal(attempt.state, 'PAID');
+      assert.deepEqual(await Promise.all([applyBankEvent(payload), applyBankEvent({ ...payload, id: randomUUID() })]), ['APPLIED', 'APPLIED']);
+      const current = await getOrder(order.id);
+      assert.equal(current.paymentStatus, 'PAID');
+      assert.ok(current.queuedAt);
+      assert.equal(current.records.length, 1);
+      assert.equal((await store.bankEvent.findUniqueOrThrow({ where: { id: payload.id } })).state, 'APPLIED');
+    });
+    await check('Worker ghép webhook chưa có attempt, không ghi tiền hai lần', async () => {
+      const order = await transfer();
+      const attempt = await beginPayment(order.id);
+      await store.paymentAttempt.update({ where: { id: attempt.id }, data: { externalId: null } });
+      const payload = event(attempt);
+      assert.equal(await applyBankEvent(payload), 'REVIEW');
+      await store.paymentAttempt.update({ where: { id: attempt.id }, data: { externalId: attempt.externalId, nextPollAt: new Date(0) } });
+      Object.assign(remotes.get(attempt.externalId!)!, { status: 'paid', paid_tx_id: payload.data.transaction_id, paid_at: payload.data.posted_at });
+      await paymentWorkerTick();
+      assert.equal((await getOrder(order.id)).paymentStatus, 'PAID');
+      assert.deepEqual(await Promise.all([applyBankEvent(payload), applyBankEvent(payload)]), ['APPLIED', 'APPLIED']);
+      assert.equal(await applyBankEvent({ ...payload, id: randomUUID() }), 'APPLIED');
+      assert.equal((await getOrder(order.id)).records.length, 1);
+      assert.equal((await store.bankEvent.findUniqueOrThrow({ where: { id: payload.id } })).state, 'APPLIED');
+      assert.equal(await store.bankEvent.count({ where: { transactionId: payload.data.transaction_id } }), 1);
+    });
+    await check('Ghép webhook vẫn kiểm tra số tiền và giữ bằng chứng cũ khi gửi lại', async () => {
+      const order = await transfer();
+      let payload!: ReturnType<typeof event>;
+      nextCreate = 'review-race';
+      beforeCreateResponse = async remote => {
+        payload = event({ externalId: String(remote.id), amount: Number(remote.amount_vnd) - 1 });
+        assert.equal(await applyBankEvent(payload), 'REVIEW');
+      };
+      const attempt = await beginPayment(order.id);
+      assert.equal(attempt.state, 'REVIEW');
+      const saved = await store.bankEvent.findUniqueOrThrow({ where: { id: payload.id } });
+      assert.match(saved.reason ?? '', /Số tiền không khớp/);
+      assert.equal(await applyBankEvent({ ...payload, data: { ...payload.data, amount_vnd: attempt.amount } }), 'REVIEW');
+      assert.equal((await getOrder(order.id)).records.length, 0);
+      await request('manage/reviews/' + payload.id, { resolution: 'Đã hoàn khoản chuyển thiếu' }, 'OWNER');
+      assert.equal(await applyBankEvent(payload), 'RESOLVED');
+    });
+    await check('QR PENDING quá hạn trả 410 và không được tái sử dụng', async () => {
+      const order = await transfer();
+      const attempt = await beginPayment(order.id);
+      await store.paymentAttempt.update({ where: { id: attempt.id }, data: { expiresAt: new Date(Date.now() - 1000) } });
+      await request('payment-qr/' + attempt.id + '?token=' + order.token, undefined, undefined, 410);
+      const next = await beginPayment(order.id);
+      assert.notEqual(next.id, attempt.id);
+      assert.equal((await store.paymentAttempt.findUniqueOrThrow({ where: { id: attempt.id } })).state, 'EXPIRED');
     });
     await check('APIBank trả yêu cầu đã hủy không hiển thị QR còn hiệu lực', async () => {
       const order = await transfer();
@@ -442,6 +550,40 @@ async function main() {
       await request('table/'+oldToken+'/open',{},undefined,404);
       await request('tables/'+table.id,{...tableBody,active:false,version:table.version},'OWNER');
       await request('table/'+table.qrToken+'/open',{},undefined,404);
+    });
+    await check('Không đóng lượt còn giao dịch REVIEW kể cả đơn đã hủy/đã hoàn tất', async () => {
+      for (const status of ['CANCELLED', 'COMPLETED']) {
+        const table = await request('tables', { name: 'Đối soát ' + status, area: 'Kiểm thử', seats: 4, active: true }, 'OWNER', 201);
+        const { token } = await request('table/' + table.qrToken + '/open', {});
+        let order = await create({ type: 'DINE_IN', tableVisitToken: token, paymentMethod: 'TRANSFER' });
+        order = await action(order, 'confirm', { taxBps: 0, shipping: 0 });
+        const attempt = await beginPayment(order.id);
+        const payload = event(attempt, { amount_vnd: attempt.amount - 1 });
+        assert.equal(await applyBankEvent(payload), 'REVIEW');
+        order = await request('orders/' + order.id, undefined, 'OWNER');
+        if (status === 'CANCELLED') order = await action(order, 'cancel', { note: 'Khách hủy, đang đối soát khoản chuyển thiếu' }, 'OWNER');
+        else {
+          order = await action(order, 'manual-pay', { note: 'Đã thu đủ tiền mặt, khoản chuyển thiếu chờ hoàn' });
+          order = await action(order, 'start', {}, 'OWNER');
+          order = await action(order, 'ready', {}, 'OWNER');
+          order = await action(order, 'complete');
+        }
+        assert.equal(order.status, status);
+        const visit = await store.tableVisit.findUniqueOrThrow({ where: { token } });
+        const denied = await request('table-visits/' + visit.id + '/close', { version: visit.version }, 'CASHIER', 409);
+        assert.match(denied.error, /đối soát/);
+        assert.equal((await store.tableVisit.findUniqueOrThrow({ where: { id: visit.id } })).closedAt, null);
+        await request('manage/reviews/' + payload.id, { resolution: 'Đã đối soát và hoàn khoản chuyển thiếu' }, 'OWNER');
+        assert.ok((await request('table-visits/' + visit.id + '/close', { version: visit.version }, 'CASHIER')).closedAt);
+      }
+    });
+    await check('Theo dõi giới hạn 60/phút/token, chia sẻ IP không khóa đơn khác', async () => {
+      const first = await create();const second = await create();const now = Date.now;const fixed = now();Date.now = () => fixed;
+      try {
+        for (let index = 0; index < 60; index++) await request('track/' + first.token, undefined, undefined, 200, '198.51.100.20');
+        await request('track/' + first.token, undefined, undefined, 429, '198.51.100.21');
+        await request('track/' + second.token, undefined, undefined, 200, '198.51.100.20');
+      } finally { Date.now = now; }
     });
     await check('Nhiều bàn chung Wi-Fi cập nhật trạng thái mà không chặn lẫn nhau',async()=>{
       const tokens:string[]=[];

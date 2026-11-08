@@ -116,9 +116,15 @@ export async function tableVisitAction(id:string,action:string,input:unknown,act
   return db.$transaction(async tx=>{
     const ref=await tx.tableVisit.findUnique({where:{id},select:{tableId:true}});ensure(ref,'Không tìm thấy lượt khách.',404);
     await lockedTable(tx,ref.tableId);
+    if(action==='close')await tx.$queryRawUnsafe('SELECT id FROM "Order" WHERE "tableVisitId" = $1 ORDER BY id FOR UPDATE',id);
     const visit=await tx.tableVisit.findUniqueOrThrow({where:{id},include:{orders:{select:{status:true,paymentStatus:true}}}});
     ensure(!visit.closedAt && visit.version===version,'Lượt khách vừa thay đổi hoặc đã kết thúc. Vui lòng tải lại.',409);
     if(action==='acknowledge')ensure(visit.billRequestedAt,'Khách chưa yêu cầu thanh toán.',409);
+    if(action==='close'){
+      const reviews=await tx.paymentAttempt.findMany({where:{order:{tableVisitId:id},state:'REVIEW'},select:{externalId:true}});
+      const unresolved=await tx.bankEvent.count({where:{externalOrderId:{in:reviews.flatMap(attempt=>attempt.externalId?[attempt.externalId]:[])},state:'REVIEW',resolvedAt:null}});
+      ensure(!unresolved,'Còn giao dịch thanh toán cần đối soát. Vui lòng xử lý trước khi kết thúc lượt khách.',409);
+    }
     if(action==='close')ensure(visit.orders.every(order=>order.status==='CANCELLED'?order.paymentStatus!=='PAID':order.status==='COMPLETED'&&order.paymentStatus==='PAID'),'Cần hoàn tất món và ghi nhận đủ thanh toán/hoàn tiền cho các đơn trước khi kết thúc lượt khách.',409);
     const data=action==='close'?{closedAt:new Date(),activeTableId:null}:action==='resume'?{billRequestedAt:null,billAcknowledgedAt:null}:{billAcknowledgedAt:visit.billAcknowledgedAt??new Date()};
     const updated=await tx.tableVisit.update({where:{id},data:{...data,version:{increment:1}}});

@@ -1,10 +1,31 @@
 'use client';
-import { createContext,useContext,useEffect,useState,useCallback,type ReactNode } from 'react';
+import { createContext,useContext,useEffect,useState,useRef,useCallback,type ReactNode } from 'react';
 import * as Dialog from '@radix-ui/react-dialog';
 import { X,WarningCircle,CheckCircle,CircleNotch } from '@phosphor-icons/react';
-export async function api<T=unknown>(url:string,options:RequestInit={}):Promise<T>{const response=await fetch(url,{...options,headers:{...(options.body&&typeof options.body==='string'?{'Content-Type':'application/json'}:{}),...options.headers},cache:'no-store'});let data;try{data=await response.json();}catch{throw new Error('Máy chủ chưa phản hồi. Vui lòng thử lại.');}if(!response.ok)throw new Error(data.error??data.message??'Không thể xử lý yêu cầu.');return data;}
+export async function api<T=unknown>(url:string,options:RequestInit&{timeoutMs?:number}={}):Promise<T>{
+ const {timeoutMs=20000,...init}=options;const timeout=AbortSignal.timeout(timeoutMs);const signal=AbortSignal.any([timeout,...(init.signal?[init.signal]:[])]);
+ try{const response=await fetch(url,{...init,signal,headers:{...(init.body&&typeof init.body==='string'?{'Content-Type':'application/json'}:{}),...init.headers},cache:'no-store'});let data;try{data=await response.json();}catch{if(signal.aborted)throw signal.reason;throw new Error('Máy chủ chưa phản hồi. Vui lòng thử lại.');}if(!response.ok)throw new Error(data.error??data.message??'Không thể xử lý yêu cầu.');return data;}catch(e){if(timeout.aborted&&signal.reason===timeout.reason)throw new Error('Yêu cầu đã hết thời gian chờ. Vui lòng thử lại.');throw e;}
+}
 export const post=<T=unknown,>(url:string,data:unknown)=>api<T>(url,{method:'POST',body:JSON.stringify(data)});
-export function useRemote<T>(url:string,interval=0){const [data,setData]=useState<T|null>(null);const [error,setError]=useState('');const [loading,setLoading]=useState(true);const [revision,setRevision]=useState(0);const reload=useCallback(()=>setRevision(v=>v+1),[]);useEffect(()=>{let alive=true;let timer:ReturnType<typeof setTimeout>;const abort=new AbortController();async function run(){try{if(!document.hidden||!data){const next=await api<T>(url,{signal:abort.signal});if(alive){setData(next);setError('');}}}catch(e){if(alive&&!abort.signal.aborted)setError(e instanceof Error?e.message:'Mất kết nối.');}finally{if(alive){setLoading(false);if(interval)timer=setTimeout(run,interval);}}}run();return()=>{alive=false;abort.abort();clearTimeout(timer);};},[url,interval,revision]);return {data,error,loading,reload};}
+export function useRemote<T>(url:string,interval=0,stopWhen?:(value:T)=>boolean){
+ const [data,setData]=useState<T|null>(null);const dataRef=useRef<{url:string;value:T|null}>({url,value:null});const stopRef=useRef(stopWhen);stopRef.current=stopWhen;
+ const [error,setError]=useState('');const [loading,setLoading]=useState(true);const [revision,setRevision]=useState(0);const reload=useCallback(()=>setRevision(v=>v+1),[]);
+ useEffect(()=>{
+  let alive=true;let running=false;let timer:ReturnType<typeof setTimeout>|undefined;const abort=new AbortController();
+  if(dataRef.current.url!==url){dataRef.current={url,value:null};setData(null);setError('');setLoading(true);}
+  const stopped=()=>dataRef.current.value!==null&&stopRef.current?.(dataRef.current.value);
+  async function run(force=false){
+   if(!alive||running||(!force&&stopped())||(document.hidden&&dataRef.current.value!==null))return;
+   clearTimeout(timer);running=true;
+   try{const next=await api<T>(url,{signal:abort.signal});if(alive){dataRef.current={url,value:next};setData(next);setError('');}}
+   catch(e){if(alive&&!abort.signal.aborted)setError(e instanceof Error?e.message:'Mất kết nối.');}
+   finally{running=false;if(alive){setLoading(false);if(interval&&!document.hidden&&!stopped())timer=setTimeout(run,interval);}}
+  }
+  function visibility(){clearTimeout(timer);if(!document.hidden)void run();}
+  document.addEventListener('visibilitychange',visibility);void run(true);
+  return()=>{alive=false;abort.abort();clearTimeout(timer);document.removeEventListener('visibilitychange',visibility);};
+ },[url,interval,revision]);return {data,error,loading,reload};
+}
 const ToastContext=createContext<(message:string,error?:boolean)=>void>(()=>{});
 export function Providers({children}:{children:ReactNode}){const [toast,setToast]=useState<{message:string;error:boolean}|null>(null);const notify=useCallback((message:string,error=false)=>setToast({message,error}),[]);useEffect(()=>{if(!toast)return;const timer=setTimeout(()=>setToast(null),5500);return()=>clearTimeout(timer);},[toast]);return <ToastContext.Provider value={notify}>{children}{toast&&<div className={'toast '+(toast.error?'error':'')} role={toast.error?'alert':'status'}>{toast.error?<WarningCircle size={22}/>:<CheckCircle size={22}/>}<span>{toast.message}</span><button className="icon-btn" aria-label="Đóng thông báo" onClick={()=>setToast(null)}><X/></button></div>}</ToastContext.Provider>;}
 export function useTask(){const notify=useContext(ToastContext);const [busy,setBusy]=useState(false);async function run<T>(action:()=>Promise<T>,success?:string){if(busy)return;setBusy(true);try{const result=await action();if(success)notify(success);return result;}catch(e){notify(e instanceof Error?e.message:'Đã xảy ra lỗi.',true);}finally{setBusy(false);}}return {busy,run,notify};}
